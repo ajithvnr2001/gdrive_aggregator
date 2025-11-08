@@ -401,6 +401,76 @@ wrangler tail
 
 ---
 
+## 🚀 **Version 2.0.0 Enhancements**
+
+### **New File Management Features**
+
+#### **Direct Download Links**
+- **Public Share Links**: Permanent `webContentLink` for sharing
+- **API Download Links**: Temporary direct download URLs with access tokens
+- **Clipboard Integration**: One-click copying with success feedback
+- **Security Warnings**: Clear expiration notices for temporary links
+
+#### **File Rename Operations**
+- **In-Place Renaming**: Rename files and folders without external tools
+- **Modal Interface**: Professional rename dialogs with current name pre-filled
+- **Real-Time Updates**: Instant folder refresh after successful rename
+- **Validation**: Input sanitization and empty name prevention
+
+#### **File Move/Organization**
+- **Cross-Folder Moves**: Move files between any accessible folders
+- **Folder Hierarchy**: Complete folder tree loading for destination selection
+- **Google Drive API**: Uses `addParents`/`removeParents` for reliable moves
+- **Safety Checks**: Prevents moving folders into themselves
+
+#### **Enhanced User Interface**
+- **Action Buttons**: Per-file action buttons (🔗 Link, 📝 Rename, 📂 Move)
+- **Modal System**: Professional modal dialogs with animations
+- **Notification System**: Success/error notifications with auto-dismiss
+- **Responsive Design**: Mobile-friendly layouts and interactions
+
+### **Technical Improvements**
+
+#### **New API Endpoints**
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/get-direct-link` | POST | Generate download and share links |
+| `/api/rename-file` | POST | Rename files and folders |
+| `/api/move-file` | POST | Move files between folders |
+| `/api/list-folders` | POST | Get folder hierarchy for UI |
+
+#### **Performance Optimizations**
+- **Lazy Loading**: Folders loaded once at session start
+- **Incremental Updates**: Only affected folders refreshed after operations
+- **Efficient Caching**: Session-based folder caching for move operations
+- **Network Optimization**: Minimal API calls with intelligent batching
+
+#### **Security Enhancements**
+- **Operation-Level Tokens**: Fresh access tokens for each file operation
+- **Input Sanitization**: HTML escaping and comprehensive validation
+- **Modal Security**: XSS prevention in all modal interactions
+- **Error Isolation**: Individual operation failures don't affect others
+
+### **User Experience Improvements**
+- **Progressive Enhancement**: Graceful degradation for unsupported features
+- **Loading States**: Clear feedback during all operations
+- **Error Recovery**: User-friendly error messages with actionable guidance
+- **Accessibility**: Keyboard navigation and screen reader support
+
+### **Architecture Benefits**
+- **Full CRUD Operations**: Complete file management (Create, Read, Update, Delete)
+- **Professional UX**: Rivals native file managers in functionality
+- **Extensible Design**: Foundation for bulk operations and advanced features
+- **Production Ready**: Comprehensive error handling and logging
+
+### **Migration from v1.0.0**
+- **Backward Compatible**: All existing features preserved
+- **Zero Breaking Changes**: Existing API endpoints unchanged
+- **Additive Enhancement**: New features layered on existing architecture
+- **Performance Maintained**: No degradation in existing functionality
+
+---
+
 ## 📞 Support & Troubleshooting
 
 ### Common Issues
@@ -427,5 +497,5 @@ Enable browser developer tools to see detailed error messages and API responses 
 ---
 
 **Last Updated**: November 2025
-**Version**: 1.0.0
-**Status**: Production Ready
+**Version**: 2.0.0 (Enhanced)
+**Status**: Production Ready with Full File Management

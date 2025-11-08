@@ -1,6 +1,14 @@
-Perfect! Here's the **complete Cloudflare Workers solution** where users upload their rclone config file and it displays Google Drive files:[1][2][3][4]
+Perfect! Here's the **enhanced Cloudflare Workers solution** where users upload their rclone config file and get full file management capabilities:[1][2][3][4]
 
-## Complete Cloudflare Workers + Frontend Solution
+## Enhanced Cloudflare Workers + Frontend Solution
+
+### 🚀 **Latest Features**
+- **Direct Download Links**: Get shareable and API download URLs
+- **File Rename**: Rename files and folders in-place
+- **File Move**: Organize files between folders
+- **Modal UI**: Professional dialogs for all operations
+- **Clipboard Integration**: One-click link copying
+- **Real-time Updates**: Instant folder refresh after operations
 
 ### 1. Cloudflare Worker (`worker.js`)
 
@@ -648,24 +656,35 @@ wrangler deploy
 ## Features[2][3][4][1]
 
 ✅ **Drag & drop upload** - Drop rclone.conf file[1][2]
-✅ **Automatic parsing** - Extracts Google Drive credentials  
+✅ **Automatic parsing** - Extracts Google Drive credentials
 ✅ **Secure storage** - Encrypted in KV with 1-hour expiry[3][4]
-✅ **Token refresh** - Auto-renews expired access tokens  
-✅ **Folder navigation** - Browse full Drive hierarchy  
-✅ **No OAuth flow** - Uses existing rclone config directly  
-✅ **Serverless** - Runs on Cloudflare's global network  
+✅ **Token refresh** - Auto-renews expired access tokens
+✅ **Folder navigation** - Browse full Drive hierarchy
+✅ **Direct download links** - Get shareable and direct download URLs
+✅ **File rename** - Rename files and folders in-place
+✅ **File move/organize** - Move files between folders
+✅ **Modal UI** - Professional dialogs for all operations
+✅ **Clipboard integration** - One-click link copying
+✅ **Real-time updates** - Instant folder refresh after operations
+✅ **No OAuth flow** - Uses existing rclone config directly
+✅ **Serverless** - Runs on Cloudflare's global network
 ✅ **CORS enabled** - Works from any domain  
 
 ## Test Your Worker
 
 ```bash
 # After deployment, you'll get a URL like:
-# https://gdrive-browser.your-account.workers.dev
+# https://gdrive-browser.ltimindtree.workers.dev
 
-# Upload your rclone.conf and browse files!
+# Upload your rclone.conf and try these features:
+# ✅ Browse files and folders
+# ✅ Get direct download links (🔗 Link button)
+# ✅ Rename files and folders (📝 Rename button)
+# ✅ Move files between folders (📂 Move button)
+# ✅ Copy links to clipboard
 ```
 
-This is a **complete production-ready solution** that handles everything server-side on Cloudflare Workers![4][2][3][1]
+This is a **complete production-ready solution** with full file management capabilities, handling everything server-side on Cloudflare Workers![4][2][3][1]
 
 [1](https://stackoverflow.com/questions/59368579/parse-raw-body-on-cloudflare-worker-servicenon-node)
 [2](https://walshy.dev/blog/21_09_10-handling-file-uploads-with-cloudflare-workers)

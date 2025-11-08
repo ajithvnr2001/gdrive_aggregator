@@ -1,4 +1,4 @@
-// ====== Cloudflare Worker - Google Drive Browser ======
+// ====== Enhanced Cloudflare Worker - Google Drive Browser ======
 
 // Simple INI parser for Cloudflare Workers
 function parseINI(text) {
@@ -38,7 +38,7 @@ export default {
     // CORS headers for browser access
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
 
@@ -102,72 +102,192 @@ export default {
       try {
         const { sessionId, remoteName, folderId = 'root' } = await request.json();
 
-        // Retrieve config from KV
-        const encryptedConfig = await env.CONFIGS.get(sessionId);
-        if (!encryptedConfig) {
-          return jsonResponse({ error: 'Session expired or invalid' }, 401, corsHeaders);
-        }
-
-        const configText = await decryptData(encryptedConfig, env.ENCRYPTION_KEY);
-        const config = parseINI(configText);
-
-        // Get specific remote
-        const remote = config[remoteName];
-        if (!remote || remote.type !== 'drive') {
-          return jsonResponse({ error: `Remote '${remoteName}' not found or not a Google Drive remote. Available remotes: ${Object.keys(config).join(', ')}` }, 404, corsHeaders);
-        }
-
-        // Parse token
-        let tokenData;
-        try {
-          tokenData = JSON.parse(remote.token);
-        } catch (tokenErr) {
-          return jsonResponse({ error: `Invalid token format: ${remote.token.substring(0, 100)}...` }, 400, corsHeaders);
-        }
-
-        // ===== KEY FIX: Use client credentials from config =====
-        const clientId = remote.client_id || '202264815644.apps.googleusercontent.com';
-        const clientSecret = remote.client_secret || 'X4Z3ca8xfWDb1Voo-F9a7ZxJ';
-
-        // Check if token expired and refresh if needed
-        let accessToken = tokenData.access_token;
-        if (tokenData.expiry && new Date(tokenData.expiry) < new Date()) {
-          try {
-            console.log('Token expired, refreshing...');
-            accessToken = await refreshGoogleToken(
-              tokenData.refresh_token,
-              clientId,
-              clientSecret
-            );
-
-            // Update stored config with new token
-            tokenData.access_token = accessToken;
-            tokenData.expiry = new Date(Date.now() + 3600000).toISOString();
-            remote.token = JSON.stringify(tokenData);
-
-            const newConfigText = stringifyIni(config);
-            const newEncrypted = await encryptData(newConfigText, env.ENCRYPTION_KEY);
-            await env.CONFIGS.put(sessionId, newEncrypted, { expirationTtl: 3600 });
-            console.log('Token refreshed successfully');
-          } catch (refreshErr) {
-            return jsonResponse({ error: `Token refresh failed: ${refreshErr.message}` }, 500, corsHeaders);
-          }
-        }
-
-        // Fetch files from Google Drive API
-        let files;
-        try {
-          console.log('Fetching files from Google Drive API...');
-          files = await listGoogleDriveFiles(accessToken, folderId);
-          console.log(`Fetched ${files.length} files`);
-        } catch (apiErr) {
-          return jsonResponse({ error: `Google Drive API error: ${apiErr.message}` }, 500, corsHeaders);
-        }
+        const accessToken = await getAccessToken(sessionId, remoteName, env);
+        const files = await listGoogleDriveFiles(accessToken, folderId);
 
         return jsonResponse({
           success: true,
           folderId,
           files
+        }, 200, corsHeaders);
+
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // ===== NEW ENDPOINT 3: Get Direct Download Link =====
+    if (url.pathname === '/api/get-direct-link' && request.method === 'POST') {
+      try {
+        const { sessionId, remoteName, fileId } = await request.json();
+
+        const accessToken = await getAccessToken(sessionId, remoteName, env);
+
+        // Fetch file metadata including webContentLink
+        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,webContentLink`;
+        const response = await fetch(fileUrl, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to get file info: ${response.status}`);
+        }
+
+        const fileData = await response.json();
+
+        // Construct direct download link
+        const directLink = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&access_token=${accessToken}`;
+
+        return jsonResponse({
+          success: true,
+          fileId: fileData.id,
+          fileName: fileData.name,
+          webContentLink: fileData.webContentLink, // Public shareable link
+          directDownloadLink: directLink, // Direct API download (temporary)
+          mimeType: fileData.mimeType,
+          size: fileData.size
+        }, 200, corsHeaders);
+
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // ===== NEW ENDPOINT 4: Rename File =====
+    if (url.pathname === '/api/rename-file' && request.method === 'POST') {
+      try {
+        const { sessionId, remoteName, fileId, newName } = await request.json();
+
+        if (!newName || newName.trim() === '') {
+          return jsonResponse({ error: 'New name is required' }, 400, corsHeaders);
+        }
+
+        const accessToken = await getAccessToken(sessionId, remoteName, env);
+
+        // Update file name using PATCH
+        const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: newName.trim()
+          })
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || 'Rename failed');
+        }
+
+        const updatedFile = await response.json();
+
+        return jsonResponse({
+          success: true,
+          file: {
+            id: updatedFile.id,
+            name: updatedFile.name,
+            mimeType: updatedFile.mimeType
+          }
+        }, 200, corsHeaders);
+
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // ===== NEW ENDPOINT 5: Move/Organize File =====
+    if (url.pathname === '/api/move-file' && request.method === 'POST') {
+      try {
+        const { sessionId, remoteName, fileId, targetFolderId } = await request.json();
+
+        if (!targetFolderId) {
+          return jsonResponse({ error: 'Target folder ID is required' }, 400, corsHeaders);
+        }
+
+        const accessToken = await getAccessToken(sessionId, remoteName, env);
+
+        // First, get current parents
+        const fileResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents`, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+
+        if (!fileResponse.ok) {
+          throw new Error('Failed to get file info');
+        }
+
+        const fileData = await fileResponse.json();
+        const previousParents = fileData.parents ? fileData.parents.join(',') : '';
+
+        // Move file by updating parents
+        const moveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${targetFolderId}&removeParents=${previousParents}&fields=id,name,parents`;
+
+        const moveResponse = await fetch(moveUrl, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({}) // Empty body, params in URL
+        });
+
+        if (!moveResponse.ok) {
+          const error = await moveResponse.json();
+          throw new Error(error.error?.message || 'Move failed');
+        }
+
+        const movedFile = await moveResponse.json();
+
+        return jsonResponse({
+          success: true,
+          file: {
+            id: movedFile.id,
+            name: movedFile.name,
+            parents: movedFile.parents
+          }
+        }, 200, corsHeaders);
+
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // ===== NEW ENDPOINT 6: List All Folders (for move dialog) =====
+    if (url.pathname === '/api/list-folders' && request.method === 'POST') {
+      try {
+        const { sessionId, remoteName } = await request.json();
+
+        const accessToken = await getAccessToken(sessionId, remoteName, env);
+
+        // Query only folders
+        const query = "mimeType='application/vnd.google-apps.folder' and trashed=false";
+        const url = `https://www.googleapis.com/drive/v3/files?` + new URLSearchParams({
+          q: query,
+          fields: 'files(id,name,parents)',
+          orderBy: 'name',
+          pageSize: 1000
+        });
+
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to list folders: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        // Add root folder
+        const folders = [
+          { id: 'root', name: 'My Drive', parents: [] },
+          ...(data.files || [])
+        ];
+
+        return jsonResponse({
+          success: true,
+          folders
         }, 200, corsHeaders);
 
       } catch (err) {
@@ -182,12 +302,51 @@ export default {
   }
 };
 
+// ===== Helper: Get and refresh access token =====
+async function getAccessToken(sessionId, remoteName, env) {
+  const encryptedConfig = await env.CONFIGS.get(sessionId);
+  if (!encryptedConfig) {
+    throw new Error('Session expired or invalid');
+  }
+
+  const configText = await decryptData(encryptedConfig, env.ENCRYPTION_KEY);
+  const config = parseINI(configText);
+
+  const remote = config[remoteName];
+  if (!remote || remote.type !== 'drive') {
+    throw new Error('Remote not found');
+  }
+
+  const tokenData = JSON.parse(remote.token);
+
+  // Check if token expired and refresh if needed
+  let accessToken = tokenData.access_token;
+  if (tokenData.expiry && new Date(tokenData.expiry) < new Date()) {
+    // Use client credentials from config
+    const clientId = remote.client_id || '202264815644.apps.googleusercontent.com';
+    const clientSecret = remote.client_secret || 'X4Z3ca8xfWDb1Voo-F9a7ZxJ';
+
+    accessToken = await refreshGoogleToken(tokenData.refresh_token, clientId, clientSecret);
+
+    // Update stored config with new token
+    tokenData.access_token = accessToken;
+    tokenData.expiry = new Date(Date.now() + 3600000).toISOString();
+    remote.token = JSON.stringify(tokenData);
+
+    const newConfigText = stringifyIni(config);
+    const newEncrypted = await encryptData(newConfigText, env.ENCRYPTION_KEY);
+    await env.CONFIGS.put(sessionId, newEncrypted, { expirationTtl: 3600 });
+  }
+
+  return accessToken;
+}
+
 // ===== Google Drive API Functions =====
 async function listGoogleDriveFiles(accessToken, folderId = 'root') {
   const query = `'${folderId}' in parents and trashed = false`;
   const url = `https://www.googleapis.com/drive/v3/files?` + new URLSearchParams({
     q: query,
-    fields: 'files(id,name,mimeType,size,modifiedTime,webViewLink)',
+    fields: 'files(id,name,mimeType,size,modifiedTime,webViewLink,webContentLink)',
     orderBy: 'folder,name',
     pageSize: 1000
   });
@@ -310,12 +469,12 @@ function jsonResponse(data, status = 200, headers = {}) {
   });
 }
 
-// ===== Frontend HTML =====
+// ===== Enhanced Frontend HTML =====
 const HTML = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Google Drive Browser - Rclone Config Upload</title>
+  <title>Google Drive Browser - Enhanced</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -342,6 +501,10 @@ const HTML = `<!DOCTYPE html>
     .upload-panel p {
       color: #666;
       margin-bottom: 30px;
+    }
+    .upload-panel h1::after {
+      content: " ✨";
+      font-size: 16px;
     }
     .upload-zone {
       border: 3px dashed #667eea;
@@ -434,6 +597,14 @@ const HTML = `<!DOCTYPE html>
       color: #5f6368;
       margin-top: 4px;
     }
+    .file-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .file-actions button {
+      padding: 6px 12px;
+      font-size: 12px;
+    }
     .loading {
       text-align: center;
       padding: 60px 20px;
@@ -445,6 +616,90 @@ const HTML = `<!DOCTYPE html>
       padding: 15px;
       border-radius: 6px;
       margin-bottom: 20px;
+    }
+    .success {
+      background: #e8f5e9;
+      color: #2e7d32;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+    }
+
+    /* Modal Styles */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.5);
+      animation: fadeIn 0.3s;
+    }
+    .modal-content {
+      background-color: white;
+      margin: 10% auto;
+      padding: 30px;
+      border-radius: 12px;
+      width: 90%;
+      max-width: 500px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      animation: slideDown 0.3s;
+    }
+    .modal-header {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: #202124;
+    }
+    .modal-body {
+      margin-bottom: 20px;
+    }
+    .modal-body input,
+    .modal-body select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-top: 10px;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    .close {
+      color: #aaa;
+      float: right;
+      font-size: 28px;
+      font-weight: bold;
+      cursor: pointer;
+      line-height: 20px;
+    }
+    .close:hover {
+      color: #000;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    @keyframes slideDown {
+      from { transform: translateY(-50px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    .link-display {
+      background: #f8f9fa;
+      padding: 12px;
+      border-radius: 6px;
+      word-break: break-all;
+      font-family: monospace;
+      font-size: 12px;
+      margin: 10px 0;
+      border: 1px solid #dee2e6;
     }
   </style>
 </head>
@@ -466,18 +721,80 @@ const HTML = `<!DOCTYPE html>
 
     <div class="file-browser" id="fileBrowser">
       <div class="browser-header">
-        <h2>📁 My Google Drive</h2>
+        <h2>📁 My Google Drive - Enhanced</h2>
+        <p style="font-size: 12px; opacity: 0.9; margin-top: 5px;">✨ Direct links • Rename • Move files</p>
         <button onclick="resetUpload()" style="background: rgba(255,255,255,0.2); margin-top: 10px;">Upload Different Config</button>
       </div>
       <div id="breadcrumb" class="breadcrumb"></div>
       <div id="fileList" class="file-list"></div>
     </div>
+
+    <!-- Rename Modal -->
+    <div id="renameModal" class="modal">
+      <div class="modal-content">
+        <span class="close" onclick="closeModal('renameModal')">&times;</span>
+        <div class="modal-header">📝 Rename File</div>
+        <div class="modal-body">
+          <label>New name:</label>
+          <input type="text" id="renameInput" placeholder="Enter new name">
+        </div>
+        <div class="modal-footer">
+          <button class="secondary" onclick="closeModal('renameModal')">Cancel</button>
+          <button class="success" onclick="performRename()">Rename</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Move Modal -->
+    <div id="moveModal" class="modal">
+      <div class="modal-content">
+        <span class="close" onclick="closeModal('moveModal')">&times;</span>
+        <div class="modal-header">📂 Move File</div>
+        <div class="modal-body">
+          <label>Select destination folder:</label>
+          <select id="folderSelect"></select>
+        </div>
+        <div class="modal-footer">
+          <button class="secondary" onclick="closeModal('moveModal')">Cancel</button>
+          <button class="success" onclick="performMove()">Move</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Direct Link Modal -->
+    <div id="linkModal" class="modal">
+      <div class="modal-content">
+        <span class="close" onclick="closeModal('linkModal')">&times;</span>
+        <div class="modal-header">🔗 Direct Download Links</div>
+        <div class="modal-body">
+          <label><strong>Public Share Link:</strong></label>
+          <div class="link-display" id="publicLink"></div>
+          <button onclick="copyToClipboard('publicLink')" style="width: 100%;">📋 Copy Public Link</button>
+
+          <label style="margin-top: 20px; display: block;"><strong>Direct API Link (Temporary):</strong></label>
+          <div class="link-display" id="apiLink"></div>
+          <button onclick="copyToClipboard('apiLink')" style="width: 100%;">📋 Copy API Link</button>
+
+          <p style="margin-top: 15px; font-size: 12px; color: #666;">
+            ⚠️ API link includes access token and expires in 1 hour
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button onclick="closeModal('linkModal')">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="notification" class="success" style="display:none; position: fixed; top: 20px; right: 20px; z-index: 1001; min-width: 300px;"></div>
+
   </div>
 
   <script>
     let sessionId = null;
     let remoteName = null;
     let folderStack = [{ id: 'root', name: 'My Drive' }];
+    let currentFileForAction = null;
+    let allFolders = [];
 
     // Drag and drop
     const uploadZone = document.getElementById('uploadZone');
@@ -530,7 +847,9 @@ const HTML = `<!DOCTYPE html>
         document.getElementById('uploadPanel').style.display = 'none';
         document.getElementById('fileBrowser').style.display = 'block';
 
-        // Load files
+        // Load folders for move functionality
+        await loadAllFolders();
+
         loadFiles('root');
 
       } catch (err) {
@@ -589,22 +908,50 @@ const HTML = `<!DOCTYPE html>
       const icon = isFolder ? '📁' : (file.mimeType.includes('image') ? '🖼️' : '📄');
       const size = file.size ? formatBytes(file.size) : '';
 
-      item.innerHTML = \`
-        <div class="file-icon">\${icon}</div>
-        <div class="file-info">
-          <div class="file-name">\${escapeHtml(file.name)}</div>
-          <div class="file-meta">\${size ? size + ' • ' : ''}Modified \${formatDate(file.modifiedTime)}</div>
-        </div>
+      const infoDiv = document.createElement('div');
+      infoDiv.className = 'file-info';
+      infoDiv.innerHTML = \`
+        <div class="file-name">\${escapeHtml(file.name)}</div>
+        <div class="file-meta">\${size ? size + ' • ' : ''}Modified \${formatDate(file.modifiedTime)}</div>
       \`;
 
       if (isFolder) {
-        item.onclick = () => {
+        infoDiv.onclick = () => {
           folderStack.push({ id: file.id, name: file.name });
           loadFiles(file.id);
         };
       } else {
-        item.onclick = () => window.open(file.webViewLink, '_blank');
+        infoDiv.onclick = () => window.open(file.webViewLink, '_blank');
       }
+
+      const iconDiv = document.createElement('div');
+      iconDiv.className = 'file-icon';
+      iconDiv.textContent = icon;
+
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'file-actions';
+
+      if (!isFolder) {
+        const linkBtn = document.createElement('button');
+        linkBtn.textContent = '🔗 Link';
+        linkBtn.className = 'success';
+        linkBtn.onclick = () => showDirectLink(file);
+        actionsDiv.appendChild(linkBtn);
+      }
+
+      const renameBtn = document.createElement('button');
+      renameBtn.textContent = '📝 Rename';
+      renameBtn.onclick = () => showRenameModal(file);
+      actionsDiv.appendChild(renameBtn);
+
+      const moveBtn = document.createElement('button');
+      moveBtn.textContent = '📂 Move';
+      moveBtn.onclick = () => showMoveModal(file);
+      actionsDiv.appendChild(moveBtn);
+
+      item.appendChild(iconDiv);
+      item.appendChild(infoDiv);
+      item.appendChild(actionsDiv);
 
       return item;
     }
@@ -650,10 +997,196 @@ const HTML = `<!DOCTYPE html>
       return date.toLocaleDateString();
     }
 
+    // ===== Direct Link Functionality =====
+    async function showDirectLink(file) {
+      try {
+        const response = await fetch('/api/get-direct-link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            remoteName,
+            fileId: file.id
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to get link');
+        }
+
+        document.getElementById('publicLink').textContent = data.webContentLink || 'Not available';
+        document.getElementById('apiLink').textContent = data.directDownloadLink;
+
+        document.getElementById('linkModal').style.display = 'block';
+
+      } catch (err) {
+        showNotification('❌ ' + err.message, 'error');
+      }
+    }
+
+    // ===== Rename Functionality =====
+    function showRenameModal(file) {
+      currentFileForAction = file;
+      document.getElementById('renameInput').value = file.name;
+      document.getElementById('renameModal').style.display = 'block';
+    }
+
+    async function performRename() {
+      const newName = document.getElementById('renameInput').value.trim();
+
+      if (!newName) {
+        showNotification('❌ Name cannot be empty', 'error');
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/rename-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            remoteName,
+            fileId: currentFileForAction.id,
+            newName: newName
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Rename failed');
+        }
+
+        closeModal('renameModal');
+        showNotification('✅ File renamed successfully!', 'success');
+
+        // Reload current folder
+        const currentFolder = folderStack[folderStack.length - 1];
+        loadFiles(currentFolder.id);
+
+      } catch (err) {
+        showNotification('❌ ' + err.message, 'error');
+      }
+    }
+
+    // ===== Move Functionality =====
+    async function loadAllFolders() {
+      try {
+        const response = await fetch('/api/list-folders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            remoteName
+          })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          allFolders = data.folders;
+        }
+
+      } catch (err) {
+        console.error('Failed to load folders:', err);
+      }
+    }
+
+    function showMoveModal(file) {
+      currentFileForAction = file;
+
+      const select = document.getElementById('folderSelect');
+      select.innerHTML = '';
+
+      allFolders.forEach(folder => {
+        if (folder.id !== file.id) { // Don't allow moving to itself
+          const option = document.createElement('option');
+          option.value = folder.id;
+          option.textContent = folder.name;
+          select.appendChild(option);
+        }
+      });
+
+      document.getElementById('moveModal').style.display = 'block';
+    }
+
+    async function performMove() {
+      const targetFolderId = document.getElementById('folderSelect').value;
+
+      if (!targetFolderId) {
+        showNotification('❌ Please select a folder', 'error');
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/move-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            remoteName,
+            fileId: currentFileForAction.id,
+            targetFolderId: targetFolderId
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Move failed');
+        }
+
+        closeModal('moveModal');
+        showNotification('✅ File moved successfully!', 'success');
+
+        // Reload current folder
+        const currentFolder = folderStack[folderStack.length - 1];
+        loadFiles(currentFolder.id);
+
+      } catch (err) {
+        showNotification('❌ ' + err.message, 'error');
+      }
+    }
+
+    // ===== Helper Functions =====
+    function closeModal(modalId) {
+      document.getElementById(modalId).style.display = 'none';
+      currentFileForAction = null;
+    }
+
+    function showNotification(message, type = 'success') {
+      const notification = document.getElementById('notification');
+      notification.textContent = message;
+      notification.className = type;
+      notification.style.display = 'block';
+
+      setTimeout(() => {
+        notification.style.display = 'none';
+      }, 3000);
+    }
+
+    function copyToClipboard(elementId) {
+      const text = document.getElementById(elementId).textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        showNotification('✅ Copied to clipboard!', 'success');
+      }).catch(() => {
+        showNotification('❌ Failed to copy', 'error');
+      });
+    }
+
     function escapeHtml(text) {
       const div = document.createElement('div');
       div.textContent = text;
       return div.innerHTML;
+    }
+
+    // Close modal when clicking outside
+    window.onclick = function(event) {
+      if (event.target.classList.contains('modal')) {
+        event.target.style.display = 'none';
+      }
     }
   </script>
 </body>

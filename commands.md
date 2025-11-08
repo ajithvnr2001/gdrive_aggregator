@@ -1,8 +1,8 @@
-# Google Drive Browser - Deployment Commands
+# Enhanced Google Drive Browser - Deployment Commands
 
 ## 📋 Complete Command Reference
 
-This document contains all commands required to set up, develop, deploy, and manage the Google Drive Browser application.
+This document contains all commands required to set up, develop, deploy, and manage the Enhanced Google Drive Browser application with direct links, rename, and move features.
 
 ## 🚀 Initial Setup
 
@@ -241,6 +241,12 @@ wrangler tail --metrics
 ```bash
 # Quick health check - make a test request
 curl -I https://gdrive-browser.ltimindtree.workers.dev
+
+# Test new API endpoints
+curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"test": "data"}' \
+     https://gdrive-browser.ltimindtree.workers.dev/api/get-direct-link
 
 # Check response headers
 curl -v https://gdrive-browser.ltimindtree.workers.dev
