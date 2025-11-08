@@ -1,0 +1,14 @@
+{
+  "name": "gdrive-browser",
+  "main": "worker.js",
+  "compatibility_date": "2024-11-01",
+  "kv_namespaces": [
+    {
+      "binding": "CONFIGS",
+      "id": "YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+  "vars": {
+    "ENCRYPTION_KEY": "your-32-character-encryption-key-here"
+  }
+}
