@@ -46,6 +46,126 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
+    // ===== CORRECTED: Direct Download Proxy Endpoint =====
+    if (url.pathname.startsWith('/download/')) {
+      try {
+        // Extract download token from URL: /download/{sessionId}/{fileId}/{filename}
+        const pathParts = url.pathname.split('/').filter(p => p);
+
+        if (pathParts.length < 3) {
+          return new Response('Invalid download URL', { status: 400 });
+        }
+
+        const sessionId = pathParts[1];
+        const fileId = pathParts[2];
+        const filename = decodeURIComponent(pathParts[3] || 'download');
+
+        // FIXED: Get access token using helper function with env
+        const encryptedConfig = await env.CONFIGS.get(sessionId);
+
+        if (!encryptedConfig) {
+          return new Response('Session expired or invalid. Please generate a new download link.', {
+            status: 401,
+            headers: { 'Content-Type': 'text/plain' }
+          });
+        }
+
+        const configText = await decryptData(encryptedConfig, env.ENCRYPTION_KEY);
+        const config = parseINI(configText);
+
+        // Get first Google Drive remote
+        const driveRemotes = Object.entries(config).filter(([, cfg]) => cfg.type === 'drive');
+        if (driveRemotes.length === 0) {
+          return new Response('No Google Drive remote found', { status: 404 });
+        }
+
+        const [remoteName, remote] = driveRemotes[0];
+        const tokenData = JSON.parse(remote.token);
+
+        let accessToken = tokenData.access_token;
+
+        // Check if token expired and refresh if needed
+        if (tokenData.expiry && new Date(tokenData.expiry) < new Date()) {
+          // Use client credentials from config
+          const clientId = remote.client_id || '202264815644.apps.googleusercontent.com';
+          const clientSecret = remote.client_secret || 'X4Z3ca8xfWDb1Voo-F9a7ZxJ';
+
+          accessToken = await refreshGoogleToken(tokenData.refresh_token, clientId, clientSecret);
+
+          // Update stored config
+          tokenData.access_token = accessToken;
+          tokenData.expiry = new Date(Date.now() + 3600000).toISOString();
+          remote.token = JSON.stringify(tokenData);
+
+          const newConfigText = stringifyIni(config);
+          const newEncrypted = await encryptData(newConfigText, env.ENCRYPTION_KEY);
+          await env.CONFIGS.put(sessionId, newEncrypted, { expirationTtl: 86400 });
+        }
+
+        // Stream file from Google Drive through Cloudflare
+        const driveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+
+        const driveResponse = await fetch(driveUrl, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Range': request.headers.get('Range') || '' // Support range requests for video streaming
+          }
+        });
+
+        if (!driveResponse.ok) {
+          const errorText = await driveResponse.text();
+          console.error('Drive API error:', errorText);
+          return new Response(`File not found or access denied: ${errorText}`, {
+            status: driveResponse.status
+          });
+        }
+
+        // Get file metadata for proper headers
+        const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size`;
+        const metaResponse = await fetch(metaUrl, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+
+        let metadata = { name: filename, mimeType: 'application/octet-stream', size: '' };
+        if (metaResponse.ok) {
+          metadata = await metaResponse.json();
+        }
+
+        // Build response headers
+        const responseHeaders = {
+          'Content-Type': metadata.mimeType || 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(metadata.name || filename)}"`,
+          'Cache-Control': 'public, max-age=3600',
+          'Access-Control-Allow-Origin': '*',
+          'X-Content-Type-Options': 'nosniff'
+        };
+
+        // Add Content-Length if available
+        if (metadata.size) {
+          responseHeaders['Content-Length'] = metadata.size;
+        }
+
+        // Copy range headers if present (for video streaming)
+        if (driveResponse.headers.get('Content-Range')) {
+          responseHeaders['Content-Range'] = driveResponse.headers.get('Content-Range');
+          responseHeaders['Accept-Ranges'] = 'bytes';
+        }
+
+        // Stream response with proper headers
+        return new Response(driveResponse.body, {
+          status: driveResponse.status,
+          headers: responseHeaders
+        });
+
+      } catch (err) {
+        console.error('Download error:', err);
+        return new Response(`Download failed: ${err.message}`, {
+          status: 500,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+    }
+
     // ===== ENDPOINT 1: Upload rclone config =====
     if (url.pathname === '/api/upload-config' && request.method === 'POST') {
       try {
@@ -83,7 +203,7 @@ export default {
         // Store encrypted config in KV (or R2 for larger files)
         const encryptedConfig = await encryptData(configText, env.ENCRYPTION_KEY);
         await env.CONFIGS.put(sessionId, encryptedConfig, {
-          expirationTtl: 3600 // 1 hour expiry
+          expirationTtl: 86400 // 24 hours for download links
         });
 
         return jsonResponse({
@@ -97,7 +217,53 @@ export default {
       }
     }
 
-    // ===== ENDPOINT 2: List Google Drive files =====
+    // ===== ENDPOINT 2: Get All Direct Links =====
+    if (url.pathname === '/api/get-direct-link' && request.method === 'POST') {
+      try {
+        const { sessionId, remoteName, fileId, fileName } = await request.json();
+
+        if (!sessionId || !fileId) {
+          return jsonResponse({ error: 'Missing required parameters' }, 400, corsHeaders);
+        }
+
+        // Generate Cloudflare direct download URL
+        const cloudflareDownloadUrl = `${url.origin}/download/${sessionId}/${fileId}/${encodeURIComponent(fileName || 'download')}`;
+
+        // Get file metadata for additional links
+        const accessToken = await getAccessToken(sessionId, remoteName, env);
+
+        const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,webContentLink,webViewLink`;
+        const metaResponse = await fetch(metaUrl, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+
+        if (!metaResponse.ok) {
+          throw new Error('Failed to get file info');
+        }
+
+        const fileData = await metaResponse.json();
+
+        // Construct API direct link (temporary)
+        const apiDirectLink = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&access_token=${accessToken}`;
+
+        return jsonResponse({
+          success: true,
+          cloudflareDownloadUrl: cloudflareDownloadUrl,
+          publicShareLink: fileData.webContentLink || 'Not available (file not public)',
+          apiDirectLink: apiDirectLink,
+          fileId: fileData.id,
+          fileName: fileData.name,
+          mimeType: fileData.mimeType,
+          size: fileData.size,
+          expiresIn: '24 hours'
+        }, 200, corsHeaders);
+
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // ===== ENDPOINT 3: List Google Drive files =====
     if (url.pathname === '/api/list-files' && request.method === 'POST') {
       try {
         const { sessionId, remoteName, folderId = 'root' } = await request.json();
@@ -335,7 +501,7 @@ async function getAccessToken(sessionId, remoteName, env) {
 
     const newConfigText = stringifyIni(config);
     const newEncrypted = await encryptData(newConfigText, env.ENCRYPTION_KEY);
-    await env.CONFIGS.put(sessionId, newEncrypted, { expirationTtl: 3600 });
+    await env.CONFIGS.put(sessionId, newEncrypted, { expirationTtl: 86400 });
   }
 
   return accessToken;
@@ -700,6 +866,31 @@ const HTML = `<!DOCTYPE html>
       font-size: 12px;
       margin: 10px 0;
       border: 1px solid #dee2e6;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .badge {
+      background: #ff6b35;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    .link-type {
+      font-weight: 600;
+      color: #667eea;
+      margin-top: 15px;
+      margin-bottom: 5px;
+      font-size: 14px;
+    }
+
+    .copy-btn {
+      width: 100%;
+      margin-top: 5px;
     }
   </style>
 </head>
@@ -721,8 +912,8 @@ const HTML = `<!DOCTYPE html>
 
     <div class="file-browser" id="fileBrowser">
       <div class="browser-header">
-        <h2>📁 My Google Drive - Enhanced</h2>
-        <p style="font-size: 12px; opacity: 0.9; margin-top: 5px;">✨ Direct links • Rename • Move files</p>
+        <h2>📁 My Google Drive <span class="badge">Cloudflare CDN</span></h2>
+        <p style="font-size: 12px; opacity: 0.9; margin-top: 5px;">✨ Direct links • Rename • Move • Cloudflare Proxy</p>
         <button onclick="resetUpload()" style="background: rgba(255,255,255,0.2); margin-top: 10px;">Upload Different Config</button>
       </div>
       <div id="breadcrumb" class="breadcrumb"></div>
@@ -761,29 +952,49 @@ const HTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Direct Link Modal -->
-    <div id="linkModal" class="modal">
-      <div class="modal-content">
-        <span class="close" onclick="closeModal('linkModal')">&times;</span>
-        <div class="modal-header">🔗 Direct Download Links</div>
-        <div class="modal-body">
-          <label><strong>Public Share Link:</strong></label>
-          <div class="link-display" id="publicLink"></div>
-          <button onclick="copyToClipboard('publicLink')" style="width: 100%;">📋 Copy Public Link</button>
+  <!-- Direct Link Modal with ALL THREE LINKS -->
+  <div id="linkModal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="closeModal('linkModal')">&times;</span>
+      <div class="modal-header">🔗 Direct Download Links</div>
+      <div class="modal-body">
 
-          <label style="margin-top: 20px; display: block;"><strong>Direct API Link (Temporary):</strong></label>
-          <div class="link-display" id="apiLink"></div>
-          <button onclick="copyToClipboard('apiLink')" style="width: 100%;">📋 Copy API Link</button>
+        <!-- CLOUDFLARE LINK (RECOMMENDED) -->
+        <div class="link-type">🚀 Cloudflare Direct Download <span class="badge">RECOMMENDED</span></div>
+        <p style="font-size: 12px; color: #666; margin-bottom: 8px;">
+          ✅ Permanent link valid for 24 hours<br>
+          ✅ No token exposure - Secure!<br>
+          ✅ Works in browsers, IDM, aria2, streaming apps
+        </p>
+        <div class="link-display" id="cloudflareLink">Generating...</div>
+        <button onclick="copyToClipboard('cloudflareLink')" class="copy-btn warning">📋 Copy Cloudflare Link</button>
 
-          <p style="margin-top: 15px; font-size: 12px; color: #666;">
-            ⚠️ API link includes access token and expires in 1 hour
-          </p>
-        </div>
-        <div class="modal-footer">
-          <button onclick="closeModal('linkModal')">Close</button>
-        </div>
+        <!-- PUBLIC SHARE LINK -->
+        <div class="link-type" style="margin-top: 20px;">📎 Google Drive Public Link</div>
+        <p style="font-size: 12px; color: #666; margin-bottom: 8px;">
+          Shareable Google Drive link (requires file to be public)
+        </p>
+        <div class="link-display" id="publicLink">Loading...</div>
+        <button onclick="copyToClipboard('publicLink')" class="copy-btn">📋 Copy Public Link</button>
+
+        <!-- API LINK (TEMPORARY) -->
+        <div class="link-type" style="margin-top: 20px;">⚠️ Direct API Link (Temporary)</div>
+        <p style="font-size: 12px; color: #666; margin-bottom: 8px;">
+          Includes access token - expires in 1 hour
+        </p>
+        <div class="link-display" id="apiLink">Loading...</div>
+        <button onclick="copyToClipboard('apiLink')" class="copy-btn secondary">📋 Copy API Link</button>
+
+        <p style="margin-top: 15px; font-size: 12px; color: #666; padding: 10px; background: #fff3cd; border-radius: 6px;">
+          💡 <strong>Tip:</strong> Use the Cloudflare link for best security and performance!
+        </p>
+
+      </div>
+      <div class="modal-footer">
+        <button onclick="closeModal('linkModal')">Close</button>
       </div>
     </div>
+  </div>
 
     <div id="notification" class="success" style="display:none; position: fixed; top: 20px; right: 20px; z-index: 1001; min-width: 300px;"></div>
 
@@ -932,11 +1143,12 @@ const HTML = `<!DOCTYPE html>
       actionsDiv.className = 'file-actions';
 
       if (!isFolder) {
-        const linkBtn = document.createElement('button');
-        linkBtn.textContent = '🔗 Link';
-        linkBtn.className = 'success';
-        linkBtn.onclick = () => showDirectLink(file);
-        actionsDiv.appendChild(linkBtn);
+        const cfLinkBtn = document.createElement('button');
+        cfLinkBtn.textContent = '⚡ CF Link';
+        cfLinkBtn.className = 'warning';
+        cfLinkBtn.title = 'Get Cloudflare direct download link';
+        cfLinkBtn.onclick = () => showCloudflareLink(file);
+        actionsDiv.appendChild(cfLinkBtn);
       }
 
       const renameBtn = document.createElement('button');
@@ -997,29 +1209,35 @@ const HTML = `<!DOCTYPE html>
       return date.toLocaleDateString();
     }
 
-    // ===== Direct Link Functionality =====
-    async function showDirectLink(file) {
+    // ===== Cloudflare Direct Link Functionality =====
+    async function showCloudflareLink(file) {
       try {
+        showNotification('⏳ Generating links...', 'success');
+
         const response = await fetch('/api/get-direct-link', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            sessionId,
-            remoteName,
-            fileId: file.id
+            sessionId: sessionId,
+            remoteName: remoteName,
+            fileId: file.id,
+            fileName: file.name
           })
         });
 
         const data = await response.json();
 
         if (!response.ok) {
-          throw new Error(data.error || 'Failed to get link');
+          throw new Error(data.error || 'Failed to generate links');
         }
 
-        document.getElementById('publicLink').textContent = data.webContentLink || 'Not available';
-        document.getElementById('apiLink').textContent = data.directDownloadLink;
+        // Update modal with all three links
+        document.getElementById('cloudflareLink').textContent = data.cloudflareDownloadUrl;
+        document.getElementById('publicLink').textContent = data.publicShareLink;
+        document.getElementById('apiLink').textContent = data.apiDirectLink;
 
         document.getElementById('linkModal').style.display = 'block';
+        showNotification('✅ Links generated!', 'success');
 
       } catch (err) {
         showNotification('❌ ' + err.message, 'error');

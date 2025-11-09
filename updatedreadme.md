@@ -432,18 +432,20 @@ wrangler tail
 ### **Technical Improvements**
 
 #### **New API Endpoints**
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/get-direct-link` | POST | Generate download and share links |
-| `/api/rename-file` | POST | Rename files and folders |
-| `/api/move-file` | POST | Move files between folders |
-| `/api/list-folders` | POST | Get folder hierarchy for UI |
+| Endpoint | Method | Purpose | Status |
+|----------|--------|---------|--------|
+| `/download/{sessionId}/{fileId}/{filename}` | GET | Cloudflare proxy download stream | ✅ Working |
+| `/api/get-direct-link` | POST | Generate all three download link types | ✅ Working |
+| `/api/rename-file` | POST | Rename files and folders | ✅ Working |
+| `/api/move-file` | POST | Move files between folders | ✅ Working |
+| `/api/list-folders` | POST | Get folder hierarchy for UI | ✅ Working |
 
 #### **Performance Optimizations**
 - **Lazy Loading**: Folders loaded once at session start
 - **Incremental Updates**: Only affected folders refreshed after operations
 - **Efficient Caching**: Session-based folder caching for move operations
 - **Network Optimization**: Minimal API calls with intelligent batching
+- **Native INI Parser**: Fast parsing without external dependencies
 
 #### **Security Enhancements**
 - **Operation-Level Tokens**: Fresh access tokens for each file operation
@@ -468,6 +470,7 @@ wrangler tail
 - **Zero Breaking Changes**: Existing API endpoints unchanged
 - **Additive Enhancement**: New features layered on existing architecture
 - **Performance Maintained**: No degradation in existing functionality
+- **INI Parser Fixed**: Replaced Deno imports with native Cloudflare Workers parser
 
 ---
 

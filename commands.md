@@ -2,7 +2,13 @@
 
 ## 📋 Complete Command Reference
 
-This document contains all commands required to set up, develop, deploy, and manage the Enhanced Google Drive Browser application with direct links, rename, and move features.
+This document contains all commands required to set up, develop, deploy, and manage the Enhanced Google Drive Browser application with:
+
+- ✅ Cloudflare direct download proxy (24-hour links, zero token exposure)
+- ✅ File rename and move operations
+- ✅ Professional modal UI with clipboard integration
+- ✅ Native INI parser (no external dependencies)
+- ✅ Full rclone config compatibility
 
 ## 🚀 Initial Setup
 
@@ -247,6 +253,12 @@ curl -X POST \
      -H "Content-Type: application/json" \
      -d '{"test": "data"}' \
      https://gdrive-browser.ltimindtree.workers.dev/api/get-direct-link
+
+# Test Cloudflare proxy download (requires valid session/file)
+curl -I https://gdrive-browser.ltimindtree.workers.dev/download/session-id/file-id/filename
+
+# Or download a file
+curl -O https://gdrive-browser.ltimindtree.workers.dev/download/session-id/file-id/filename
 
 # Check response headers
 curl -v https://gdrive-browser.ltimindtree.workers.dev
